@@ -1,1 +1,1 @@
-##WP-Scanner Recon Tool using Python GUI
+## WP-Scanner Recon Tool using Python GUI
