@@ -1,164 +1,173 @@
+import requests
+import json
+import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
-from tkinter import ttk
-from PIL import Image, ImageTk
+from tkinter import ttk, scrolledtext, messagebox
+from colorama import init
 
-# ====================
-# Encoding Function
-# ====================
-def encode_message(img_path, message, output_path):
-    image = Image.open(img_path)
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
-    encoded = image.copy()
-    width, height = image.size
-    index = 0
-    message += "###END###"
+# Initialize colorama (not used in GUI, optional)
+init()
 
-    binary_message = ''.join([format(ord(char), '08b') for char in message])
-    msg_len = len(binary_message)
+# Define the scan function
+def scan_wordpress(target_url, output_box, status_label, progress):
+    checks = ['xmlrpc.php', 'wp-cron.php', 'wp-config.php', 'wp-includes/', 'wp-content',
+              'wp-json', 'robots.txt', 'sitemap.xml', '.htaccess', '.gitignore', '.git', '.log', 'readme.html']
+    ua = {'user-agent': 'Mozilla/5.0'}
 
-    for row in range(height):
-        for col in range(width):
-            if index < msg_len:
-                r, g, b = image.getpixel((col, row))
-                r = r & ~1 | int(binary_message[index])
-                index += 1
-                if index < msg_len:
-                    g = g & ~1 | int(binary_message[index])
-                    index += 1
-                if index < msg_len:
-                    b = b & ~1 | int(binary_message[index])
-                    index += 1
-                encoded.putpixel((col, row), (r, g, b))
-            else:
-                encoded.save(output_path)
-                return True
-    encoded.save(output_path)
-    return True
+    # Normalize URL
+    website = target_url.strip().replace("https://", "").replace("http://", "").rstrip("/")
+    website = "https://" + website
 
-# ====================
-# Decoding Function
-# ====================
-def decode_message(img_path):
-    image = Image.open(img_path)
-    binary_message = ""
-    for pixel in image.getdata():
-        for color in pixel[:3]:
-            binary_message += str(color & 1)
+    def log(msg, color="black"):
+        output_box.insert(tk.END, msg + '\n', color)
+        output_box.see(tk.END)
 
-    chars = [binary_message[i:i+8] for i in range(0, len(binary_message), 8)]
-    decoded = ""
+    output_box.delete('1.0', tk.END)
+    status_label.config(text="Scanning in progress...", foreground="blue")
+    progress.start()
 
-    for char in chars:
+    log("Scanning target: " + website, "blue")
+
+    for i, path in enumerate(checks):
+        url = f"{website}/{path}"
         try:
-            decoded += chr(int(char, 2))
-        except ValueError:
-            break
-        if decoded.endswith("###END###"):
-            return decoded.split("###END###")[0]
-    return "No hidden message found."
+            response = requests.get(url, headers=ua, timeout=10)
+            status_code = response.status_code
+            source = response.text
 
-# ====================
-# GUI Class
-# ====================
-class StegGUI:
-    def __init__(self, master):
-        self.master = master
-        master.title("Steganography Tool")
+            if "xmlrpc.php" in url:
+                if "XML-RPC server accepts POST requests only" in source:
+                    log(f"[+] XML-RPC is enabled :) URL: {url}", "green")
+                else:
+                    log("[!] XML-RPC is disabled :(", "red")
 
-        # === Window Sizing and Centering ===
-        window_width = 800
-        window_height = 600
-        screen_width = master.winfo_screenwidth()
-        screen_height = master.winfo_screenheight()
-        x = (screen_width // 2) - (window_width // 2)
-        y = (screen_height // 2) - (window_height // 2)
-        master.geometry(f"{window_width}x{window_height}+{x}+{y}")
-        master.resizable(False, False)  # Optional: disable resizing
-        master.configure(bg="#f4f4f4")
+            elif "wp-config.php" in url:
+                log_status("wp-config.php", source, url, log)
 
-        self.image_path = None
+            elif "wp-cron.php" in url:
+                log_status("wp-cron.php", source, url, log)
 
-        # ==== Frames ====
-        self.top_frame = tk.Frame(master, bg="#f4f4f4")
-        self.top_frame.pack(pady=10)
+            elif "wp-includes" in url:
+                if "Index of" in source:
+                    log(f"[+] Directory listing enabled in /wp-includes/: {url}", "green")
+                else:
+                    log(f"[!] Directory listing disabled in /wp-includes/", "red")
 
-        self.middle_frame = tk.Frame(master, bg="#f4f4f4")
-        self.middle_frame.pack(pady=10)
+            elif "wp-content" in url:
+                if "Index of" in source:
+                    log(f"[+] Directory listing enabled in /wp-content/: {url}", "green")
+                else:
+                    log(f"[!] Directory listing disabled in /wp-content/", "red")
 
-        self.bottom_frame = tk.Frame(master, bg="#f4f4f4")
-        self.bottom_frame.pack(pady=10)
+            elif "wp-json" in url:
+                if "rest_login_required" in source or "rest_cannot_access" in source:
+                    log("[!] wp-json is disabled :(", "red")
+                elif "description" in source or "endpoints" in source:
+                    log(f"[+] wp-json is enabled :) URL: {url}", "green")
+                    user_enum_url = f"{url}/wp/v2/users"
+                    log("Trying to enumerate users...", "cyan")
+                    log(f"User Enum URL: {user_enum_url}", "blue")
+                    try:
+                        user_data = requests.get(user_enum_url, headers=ua).json()
+                        for user in user_data:
+                            log(f"User found: {user['slug']}", "green")
+                    except Exception:
+                        log("[!] Failed to enumerate users", "red")
 
-        # ==== Top Frame ====
-        self.choose_button = ttk.Button(self.top_frame, text="📁 Choose Image", command=self.choose_image)
-        self.choose_button.grid(row=0, column=0, padx=10)
+            elif "robots.txt" in url:
+                if "User-agent" in source:
+                    log(f"[+] robots.txt found: {url}", "green")
+                    log(f"Content:\n{source}", "blue")
+                else:
+                    log("[!] robots.txt not found", "red")
 
-        self.image_label = tk.Label(self.top_frame, text="No image selected", bg="#f4f4f4")
-        self.image_label.grid(row=0, column=1, sticky="w")
+            elif "sitemap.xml" in url:
+                if status_code == 200:
+                    log(f"[+] Sitemap found: {url}", "green")
+                elif status_code == 302:
+                    log(f"[+] Redirected to wp-sitemap.xml: {website}/wp-sitemap.xml", "green")
+                else:
+                    log("[!] Sitemap not found", "red")
 
-        self.preview = tk.Label(self.top_frame, bg="#ddd", width=300, height=200)
-        self.preview.grid(row=1, column=0, columnspan=2, pady=10)
+            elif any(f in url for f in ['.htaccess', '.gitignore', '.git', '.log', 'readme.html']):
+                if status_code == 200:
+                    log(f"[+] {path} found: {url}", "green")
+                elif status_code == 403:
+                    log(f"[!] {path} found but forbidden to access", "red")
+                else:
+                    log(f"[!] {path} not found", "red")
 
-        # ==== Middle Frame ====
-        ttk.Label(self.middle_frame, text="🔐 Message to Hide:", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w")
-        self.message_entry = tk.Text(self.middle_frame, height=5, width=80)
-        self.message_entry.grid(row=1, column=0, pady=5)
-
-        self.encode_button = ttk.Button(self.middle_frame, text="🔒 Encode Message", command=self.encode)
-        self.encode_button.grid(row=2, column=0, pady=10)
-
-        # ==== Bottom Frame ====
-        self.decode_button = ttk.Button(self.bottom_frame, text="🔓 Decode Message", command=self.decode)
-        self.decode_button.grid(row=0, column=0, pady=5)
-
-        ttk.Label(self.bottom_frame, text="📄 Decoded Message:", font=("Arial", 12, "bold")).grid(row=1, column=0, sticky="w")
-        self.output_text = tk.Text(self.bottom_frame, height=10, width=80)
-        self.output_text.grid(row=2, column=0, pady=5)
-
-    def choose_image(self):
-        path = filedialog.askopenfilename(filetypes=[("PNG Image", "*.png")])
-        if path:
-            self.image_path = path
-            self.image_label.config(text=path.split("/")[-1])
-            image = Image.open(path)
-            image.thumbnail((300, 200))
-            photo = ImageTk.PhotoImage(image)
-            self.preview.config(image=photo)
-            self.preview.image = photo
-
-    def encode(self):
-        if not self.image_path:
-            messagebox.showerror("Error", "Please choose an image.")
-            return
-        message = self.message_entry.get("1.0", tk.END).strip()
-        if not message:
-            messagebox.showerror("Error", "Please enter a message to hide.")
-            return
-        output_path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG Image", "*.png")])
-        if output_path:
-            try:
-                success = encode_message(self.image_path, message, output_path)
-                if success:
-                    messagebox.showinfo("Success", f"Message successfully encoded in:\n{output_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Encoding failed:\n{str(e)}")
-
-    def decode(self):
-        if not self.image_path:
-            messagebox.showerror("Error", "Please choose an image.")
-            return
-        try:
-            hidden_msg = decode_message(self.image_path)
-            self.output_text.delete("1.0", tk.END)
-            self.output_text.insert(tk.END, hidden_msg)
         except Exception as e:
-            messagebox.showerror("Error", f"Decoding failed:\n{str(e)}")
+            log(f"[!] Error checking {url}: {str(e)}", "red")
 
-# ====================
-# Run Application
-# ====================
-if __name__ == "__main__":
+    progress.stop()
+    status_label.config(text="Scan complete ✅", foreground="green")
+
+
+def log_status(file, source, url, log):
+    if source.strip() == "":
+        log(f"[!] {file} is not accessible :(", "red")
+    else:
+        log(f"[+] {file} is accessible! URL: {url}", "green")
+
+
+# GUI Setup
+def start_gui():
     root = tk.Tk()
-    app = StegGUI(root)
+    root.title("WordPress Recon Scanner")
+    root.geometry("850x650")
+
+    style = ttk.Style()
+    style.configure("TButton", font=("Arial", 12))
+    style.configure("TLabel", font=("Arial", 12))
+    style.configure("TEntry", font=("Arial", 12))
+
+    frame = ttk.Frame(root, padding=20)
+    frame.pack(fill="both", expand=True)
+
+    ttk.Label(frame, text="Enter WordPress Target URL:").pack(anchor="w")
+
+    entry = ttk.Entry(frame, width=100)
+    entry.pack(pady=10)
+
+    # Output display box
+    output_box = scrolledtext.ScrolledText(frame, wrap=tk.WORD, width=100, height=25, font=("Courier", 10))
+    output_box.pack()
+
+    # Define color tags
+    for color in ["green", "red", "blue", "cyan"]:
+        output_box.tag_config(color, foreground=color)
+
+    # Status label
+    status_label = ttk.Label(frame, text="Idle", foreground="grey")
+    status_label.pack(pady=5)
+
+    # Progress bar
+    progress = ttk.Progressbar(frame, orient="horizontal", mode="indeterminate", length=200)
+    progress.pack(pady=5)
+
+    # Start scan function
+    def start_scan():
+        url = entry.get().strip()
+        if not url:
+            messagebox.showerror("Error", "Please enter a target URL.")
+            return
+        threading.Thread(target=scan_wordpress, args=(url, output_box, status_label, progress), daemon=True).start()
+
+    # Clear output
+    def clear_output():
+        output_box.delete('1.0', tk.END)
+        status_label.config(text="Output cleared", foreground="gray")
+
+    # Button frame
+    button_frame = ttk.Frame(frame)
+    button_frame.pack(pady=10)
+
+    ttk.Button(button_frame, text="Start Scan", command=start_scan).pack(side="left", padx=10)
+    ttk.Button(button_frame, text="Clear Output", command=clear_output).pack(side="left", padx=10)
+
     root.mainloop()
+
+
+# Run the GUI
+start_gui()
